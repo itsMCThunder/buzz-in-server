@@ -1,148 +1,180 @@
-// main.jsx — Buzz-In Frontend with Hot Seat support
+// server.js — Buzz-In Backend with Teams, Hot Seat, and Timer
+const express = require("express");
+const http = require("http");
+const { Server } = require("socket.io");
+const { v4: uuidv4 } = require("uuid");
 
-import React, { useState, useEffect } from "react";
-import ReactDOM from "react-dom/client";
-import io from "socket.io-client";
+const app = express();
+const server = http.createServer(app);
+const io = new Server(server, {
+  cors: { origin: "*" },
+  path: "/socket.io",
+});
 
-const socket = io("/", { path: "/socket.io" });
+const rooms = {}; // roomCode -> { hostId, players[], buzzQueue[], locked, teamQueues, teamScores }
 
-function App() {
-  const [step, setStep] = useState("menu"); // menu | lobby | game
-  const [roomCode, setRoomCode] = useState("");
-  const [name, setName] = useState("");
-  const [room, setRoom] = useState(null);
-  const [isHost, setIsHost] = useState(false);
-
-  // listen for state updates
-  useEffect(() => {
-    socket.on("room_state", (data) => {
-      setRoom(data);
-    });
-    return () => socket.off("room_state");
-  }, []);
-
-  function createRoom() {
-    if (!name) return;
-    socket.emit("create_room", { hostName: name }, (res) => {
-      if (res.ok) {
-        setRoomCode(res.roomCode);
-        setIsHost(true);
-        setStep("lobby");
-      } else alert(res.error);
-    });
-  }
-
-  function joinRoom() {
-    if (!roomCode || !name) return;
-    socket.emit("join_room", { roomCode, name }, (res) => {
-      if (res.ok) {
-        setIsHost(false);
-        setStep("lobby");
-      } else alert(res.error);
-    });
-  }
-
-  // host actions
-  function startGame() {
-    socket.emit("start_game", { roomCode });
-  }
-
-  function nextRound() {
-    socket.emit("next_round", { roomCode });
-  }
-
-  function clearBuzzers() {
-    socket.emit("clear_buzzers", { roomCode });
-  }
-
-  function adjustScore(playerId, delta) {
-    socket.emit("adjust_score", { roomCode, playerId, delta });
-  }
-
-  function buzz() {
-    socket.emit("buzz", { roomCode });
-  }
-
-  // -------------------- UI --------------------
-  if (step === "menu") {
-    return (
-      <div>
-        <h1>Buzz-In</h1>
-        <input placeholder="Your Name" value={name} onChange={(e) => setName(e.target.value)} />
-        <div>
-          <button onClick={createRoom}>Host Game</button>
-        </div>
-        <div>
-          <input placeholder="Room Code" value={roomCode} onChange={(e) => setRoomCode(e.target.value.toUpperCase())} />
-          <button onClick={joinRoom}>Join Game</button>
-        </div>
-      </div>
-    );
-  }
-
-  if (!room) return <div>Loading room...</div>;
-
-  return (
-    <div>
-      <h1>Room {room.roomCode}</h1>
-      <h2>Team Scores</h2>
-      <p>Tipsy: {room.teamScores?.tipsy ?? 0} | Wobbly: {room.teamScores?.wobbly ?? 0}</p>
-
-      {room.countdownActive && <h3>Countdown Active! 15s in progress...</h3>}
-
-      <h2>Players</h2>
-      <ul>
-        {room.players.map((p) => {
-          const isHotSeat =
-            p.id === room.currentHotSeats?.tipsy || p.id === room.currentHotSeats?.wobbly;
-          return (
-            <li key={p.id}>
-              {p.name} ({p.team || "Unassigned"}) - {p.score} pts{" "}
-              {isHotSeat && <strong>🔥 Hot Seat</strong>}
-              {isHost && (
-                <>
-                  <button onClick={() => adjustScore(p.id, 50)}>+50</button>
-                  <button onClick={() => adjustScore(p.id, 0)}>0</button>
-                  <button onClick={() => adjustScore(p.id, -50)}>-50</button>
-                </>
-              )}
-            </li>
-          );
-        })}
-      </ul>
-
-      {isHost ? (
-        <div>
-          <button onClick={startGame}>Start Game</button>
-          <button onClick={nextRound}>Next Round</button>
-          <button onClick={clearBuzzers}>Clear Buzzers</button>
-        </div>
-      ) : (
-        <div>
-          <button
-            onClick={buzz}
-            disabled={room.locked}
-            style={{
-              padding: "20px",
-              fontSize: "24px",
-              backgroundColor: room.locked ? "gray" : "orange",
-            }}
-          >
-            BUZZ!
-          </button>
-        </div>
-      )}
-
-      <h2>Buzz Queue</h2>
-      <ol>
-        {room.buzzQueue.map((id) => {
-          const p = room.players.find((x) => x.id === id);
-          return <li key={id}>{p ? p.name : id}</li>;
-        })}
-      </ol>
-    </div>
-  );
+function generateRoomCode() {
+  return Math.random().toString(36).substring(2, 6).toUpperCase();
 }
 
-const root = ReactDOM.createRoot(document.getElementById("root"));
-root.render(<App />);
+function emitRoom(roomCode) {
+  const room = rooms[roomCode];
+  if (room) io.to(roomCode).emit("room_state", room);
+}
+
+// --- Socket.io ---
+io.on("connection", (socket) => {
+  console.log("New connection", socket.id);
+
+  socket.on("create_room", ({ hostName }, cb) => {
+    const code = generateRoomCode();
+    rooms[code] = {
+      roomCode: code,
+      hostId: socket.id,
+      players: [{ id: socket.id, name: hostName, team: null, score: 0 }],
+      buzzQueue: [],
+      locked: true,
+      teamQueues: { tipsy: [], wobbly: [] },
+      currentHotSeats: { tipsy: null, wobbly: null },
+      teamScores: { tipsy: 0, wobbly: 0 },
+      countdownActive: false,
+    };
+    socket.join(code);
+    cb({ ok: true, roomCode: code });
+    emitRoom(code);
+  });
+
+  socket.on("join_room", ({ roomCode, name }, cb) => {
+    const room = rooms[roomCode];
+    if (!room) return cb({ ok: false, error: "Room not found" });
+    room.players.push({ id: socket.id, name, team: null, score: 0 });
+    socket.join(roomCode);
+    cb({ ok: true });
+    emitRoom(roomCode);
+  });
+
+  // --- Team assignment ---
+  socket.on("assign_team", ({ roomCode, playerId, team }) => {
+    const room = rooms[roomCode];
+    if (!room) return;
+    const player = room.players.find((p) => p.id === playerId);
+    if (player) {
+      player.team = team;
+      if (!room.teamQueues[team].includes(playerId)) {
+        room.teamQueues[team].push(playerId);
+      }
+      emitRoom(roomCode);
+    }
+  });
+
+  // --- Host controls ---
+  socket.on("start_game", ({ roomCode }) => {
+    const room = rooms[roomCode];
+    if (!room) return;
+
+    // Pick first hot seat players
+    const tipsyHot = room.teamQueues.tipsy[0] || null;
+    const wobblyHot = room.teamQueues.wobbly[0] || null;
+    room.currentHotSeats = { tipsy: tipsyHot, wobbly: wobblyHot };
+
+    room.locked = true; // all locked until buzz
+    room.buzzQueue = [];
+    emitRoom(roomCode);
+  });
+
+  socket.on("next_round", ({ roomCode }) => {
+    const room = rooms[roomCode];
+    if (!room) return;
+
+    // Rotate queues
+    if (room.teamQueues.tipsy.length > 0) {
+      room.teamQueues.tipsy.push(room.teamQueues.tipsy.shift());
+    }
+    if (room.teamQueues.wobbly.length > 0) {
+      room.teamQueues.wobbly.push(room.teamQueues.wobbly.shift());
+    }
+
+    room.currentHotSeats = {
+      tipsy: room.teamQueues.tipsy[0] || null,
+      wobbly: room.teamQueues.wobbly[0] || null,
+    };
+
+    room.locked = true;
+    room.buzzQueue = [];
+    room.countdownActive = false;
+    emitRoom(roomCode);
+  });
+
+  socket.on("clear_buzzers", ({ roomCode }) => {
+    const room = rooms[roomCode];
+    if (!room) return;
+    room.buzzQueue = [];
+    emitRoom(roomCode);
+  });
+
+  socket.on("adjust_score", ({ roomCode, playerId, delta }) => {
+    const room = rooms[roomCode];
+    if (!room) return;
+    const player = room.players.find((p) => p.id === playerId);
+    if (player) {
+      player.score += delta;
+      if (player.team) {
+        room.teamScores[player.team] += delta;
+      }
+    }
+    emitRoom(roomCode);
+  });
+
+  // --- Buzz logic ---
+  socket.on("buzz", ({ roomCode }) => {
+    const room = rooms[roomCode];
+    if (!room) return;
+
+    if (room.locked) return; // cannot buzz when locked
+    if (room.buzzQueue.includes(socket.id)) return;
+
+    room.buzzQueue.push(socket.id);
+
+    // If hot seat buzzed first, start timer
+    if (
+      socket.id === room.currentHotSeats.tipsy ||
+      socket.id === room.currentHotSeats.wobbly
+    ) {
+      room.countdownActive = true;
+      room.locked = true; // lock others for countdown
+      emitRoom(roomCode);
+
+      setTimeout(() => {
+        room.locked = false; // unlock after 15s
+        room.countdownActive = false;
+        emitRoom(roomCode);
+      }, 15000);
+    }
+
+    emitRoom(roomCode);
+  });
+
+  socket.on("disconnect", () => {
+    for (const code in rooms) {
+      const room = rooms[code];
+      room.players = room.players.filter((p) => p.id !== socket.id);
+      room.teamQueues.tipsy = room.teamQueues.tipsy.filter(
+        (id) => id !== socket.id
+      );
+      room.teamQueues.wobbly = room.teamQueues.wobbly.filter(
+        (id) => id !== socket.id
+      );
+      if (room.hostId === socket.id) {
+        delete rooms[code];
+      } else {
+        emitRoom(code);
+      }
+    }
+  });
+});
+
+// --- Serve app ---
+app.use(express.static("dist"));
+
+const PORT = process.env.PORT || 3000;
+server.listen(PORT, () => console.log("Server running on", PORT));
