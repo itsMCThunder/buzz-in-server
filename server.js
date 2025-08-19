@@ -121,19 +121,23 @@ io.on("connection", (socket) => {
   });
 
   // ---------- NEW: Handle score adjustment from host ----------
-  socket.on("adjust_score", ({ roomCode, playerId, delta }) => {
-    const code = (roomCode || "").toUpperCase().trim();
-    const room = rooms.get(code);
-    if (!room) return;
+ socket.on("adjust_score", ({ roomCode, playerId, delta }) => {
+  const room = rooms.get(roomCode);
+  if (!room || room.hostId !== socket.id) return;
 
-    const player = room.players.find((p) => p.id === playerId);
-    if (!player) return;
+  const player = room.players.find((p) => p.id === playerId);
+  if (!player) return;
 
-    // Update player score
-    player.score = (player.score || 0) + delta;
+  // Update score
+  player.score = (player.score || 0) + delta;
 
-    emitState(code); // Broadcast updated scores
-  });
+  // Remove player from the buzz queue
+  room.buzzQueue = room.buzzQueue.filter((id) => id !== playerId);
+
+  // Emit updated state (standardized to room_state)
+  emitState(roomCode);
+});
+
 
   socket.on("next_question", ({ roomCode }) => {
     const code = (roomCode || "").toUpperCase().trim();
