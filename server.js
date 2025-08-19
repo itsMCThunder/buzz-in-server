@@ -118,26 +118,30 @@ io.on("connection", (socket) => {
     emitState(code);
   });
 
-  socket.on("award", ({ roomCode, playerId, delta = 50 }) => {
-    const code = (roomCode || "").toUpperCase().trim();
-    const room = rooms.get(code);
-    if (!room || room.hostId !== socket.id) return;
-    const p = room.players.find((x) => x.id === playerId);
-    if (p) p.score = (p.score || 0) + (Number(delta) || 0);
-    if (room.buzzQueue[0] === playerId) room.buzzQueue.shift();
-    room.showScores = true;
-    emitState(code);
-  });
+  // Handle score adjustment from host
+socket.on("adjust_score", ({ roomCode, playerId, delta }) => {
+  const room = rooms[roomCode];
+  if (!room) return;
 
-  socket.on("penalty", ({ roomCode, playerId, delta = -50 }) => {
-    const code = (roomCode || "").toUpperCase().trim();
-    const room = rooms.get(code);
-    if (!room || room.hostId !== socket.id) return;
-    const p = room.players.find((x) => x.id === playerId);
-    if (p) p.score = (p.score || 0) + (Number(delta) || 0);
-    if (room.buzzQueue[0] === playerId) room.buzzQueue.shift();
-    emitState(code);
-  });
+  const player = room.players.find((p) => p.id === playerId);
+  if (!player) return;
+
+  // Update player score
+  player.score = (player.score || 0) + delta;
+
+  // Update team totals if assigned
+  if (player.team) {
+    if (!room.teamScores) {
+      room.teamScores = { tipsy: 0, wobbly: 0 };
+    }
+    room.teamScores[player.team] =
+      (room.teamScores[player.team] || 0) + delta;
+  }
+
+  // Send update to everyone in the room
+  io.to(roomCode).emit("room_update", room);
+});
+
 
   socket.on("next_question", ({ roomCode }) => {
     const code = (roomCode || "").toUpperCase().trim();
