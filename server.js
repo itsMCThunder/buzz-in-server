@@ -7,10 +7,7 @@ const app = express();
 const httpServer = createServer(app);
 
 const io = new Server(httpServer, {
-  cors: {
-    origin: "*", // for now allow all
-    methods: ["GET", "POST"],
-  },
+  cors: { origin: "*", methods: ["GET", "POST"] },
 });
 
 const rooms = {}; // { roomCode: { hostId, players: [] } }
@@ -18,7 +15,7 @@ const rooms = {}; // { roomCode: { hostId, players: [] } }
 io.on("connection", (socket) => {
   console.log("Client connected:", socket.id);
 
-  // Create a new room
+  // Create a room
   socket.on("create_room", ({ hostName }, cb) => {
     const roomCode = nanoid(4).toUpperCase();
     rooms[roomCode] = {
@@ -30,7 +27,7 @@ io.on("connection", (socket) => {
     emitRoom(roomCode);
   });
 
-  // Join an existing room
+  // Join room
   socket.on("join_room", ({ roomCode, name }, cb) => {
     const room = rooms[roomCode];
     if (!room) return cb({ ok: false, error: "Room not found" });
@@ -41,8 +38,26 @@ io.on("connection", (socket) => {
     emitRoom(roomCode);
   });
 
+  // Assign player to a team
+  socket.on("assign_team", ({ roomCode, playerId, team }) => {
+    const room = rooms[roomCode];
+    if (!room) return;
+    const player = room.players.find((p) => p.id === playerId);
+    if (player) player.team = team;
+    emitRoom(roomCode);
+  });
+
+  // Update a player’s score
+  socket.on("update_score", ({ roomCode, playerId, delta }) => {
+    const room = rooms[roomCode];
+    if (!room) return;
+    const player = room.players.find((p) => p.id === playerId);
+    if (player) player.score += delta;
+    emitRoom(roomCode);
+  });
+
+  // Disconnect handling
   socket.on("disconnect", () => {
-    console.log("Disconnected:", socket.id);
     for (const [code, room] of Object.entries(rooms)) {
       room.players = room.players.filter((p) => p.id !== socket.id);
       if (room.players.length === 0) delete rooms[code];
