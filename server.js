@@ -1,82 +1,146 @@
+// server.js
 import express from "express";
-import { createServer } from "http";
+import http from "http";
 import { Server } from "socket.io";
+import Database from "better-sqlite3";
 import { nanoid } from "nanoid";
 
+// Setup Express + Socket.io
 const app = express();
-const httpServer = createServer(app);
-
-const io = new Server(httpServer, {
-  cors: { origin: "*", methods: ["GET", "POST"] },
+const server = http.createServer(app);
+const io = new Server(server, {
+  cors: {
+    origin: "*",
+    methods: ["GET", "POST"]
+  }
 });
 
-const rooms = {}; // { roomCode: { hostId, players: [] } }
+// --- SQLite Setup ---
+const db = new Database("rooms.db");
 
+// Create tables if not exist
+db.exec(`
+  CREATE TABLE IF NOT EXISTS rooms (
+    code TEXT PRIMARY KEY,
+    hostId TEXT
+  );
+  CREATE TABLE IF NOT EXISTS players (
+    id TEXT PRIMARY KEY,
+    name TEXT,
+    team TEXT,
+    score INTEGER,
+    roomCode TEXT,
+    FOREIGN KEY(roomCode) REFERENCES rooms(code)
+  );
+`);
+
+// --- Helper Functions ---
+function createRoom(hostId) {
+  const code = nanoid(6).toUpperCase();
+  db.prepare("INSERT INTO rooms (code, hostId) VALUES (?, ?)").run(code, hostId);
+  return code;
+}
+
+function addPlayer(roomCode, id, name) {
+  db.prepare(
+    "INSERT INTO players (id, name, team, score, roomCode) VALUES (?, ?, ?, ?, ?)"
+  ).run(id, name, null, 0, roomCode);
+}
+
+function getRoom(roomCode) {
+  const room = db.prepare("SELECT * FROM rooms WHERE code = ?").get(roomCode);
+  if (!room) return null;
+  const players = db.prepare("SELECT * FROM players WHERE roomCode = ?").all(roomCode);
+  return { ...room, players };
+}
+
+function removePlayer(id) {
+  db.prepare("DELETE FROM players WHERE id = ?").run(id);
+}
+
+function updatePlayerScore(id, delta) {
+  db.prepare("UPDATE players SET score = score + ? WHERE id = ?").run(delta, id);
+}
+
+function assignTeam(id, team) {
+  db.prepare("UPDATE players SET team = ? WHERE id = ?").run(team, id);
+}
+
+function deleteRoom(roomCode) {
+  db.prepare("DELETE FROM players WHERE roomCode = ?").run(roomCode);
+  db.prepare("DELETE FROM rooms WHERE code = ?").run(roomCode);
+}
+
+// --- Emit Room State ---
+function emitRoom(roomCode) {
+  const room = getRoom(roomCode);
+  if (room) io.to(roomCode).emit("room_update", room);
+}
+
+// --- Socket.io Events ---
 io.on("connection", (socket) => {
-  console.log("Client connected:", socket.id);
+  console.log("New connection:", socket.id);
 
-  // Create a room
   socket.on("create_room", ({ hostName }, cb) => {
-    const roomCode = nanoid(4).toUpperCase();
-    rooms[roomCode] = {
-      hostId: socket.id,
-      players: [{ id: socket.id, name: hostName, team: null, score: 0 }],
-    };
-    socket.join(roomCode);
-    cb({ ok: true, roomCode });
-    emitRoom(roomCode);
+    try {
+      const roomCode = createRoom(socket.id);
+      addPlayer(roomCode, socket.id, hostName);
+      socket.join(roomCode);
+      emitRoom(roomCode);
+      cb({ ok: true, roomCode });
+    } catch (err) {
+      console.error(err);
+      cb({ ok: false, error: "Failed to create room" });
+    }
   });
 
-  // Join room
   socket.on("join_room", ({ roomCode, name }, cb) => {
-    const room = rooms[roomCode];
+    const room = getRoom(roomCode);
     if (!room) return cb({ ok: false, error: "Room not found" });
-
-    room.players.push({ id: socket.id, name, team: null, score: 0 });
-    socket.join(roomCode);
-    cb({ ok: true, roomCode });
-    emitRoom(roomCode);
+    try {
+      addPlayer(roomCode, socket.id, name);
+      socket.join(roomCode);
+      emitRoom(roomCode);
+      cb({ ok: true });
+    } catch (err) {
+      cb({ ok: false, error: "Failed to join" });
+    }
   });
 
-  // Assign player to a team
-  socket.on("assign_team", ({ roomCode, playerId, team }) => {
-    const room = rooms[roomCode];
-    if (!room) return;
-    const player = room.players.find((p) => p.id === playerId);
-    if (player) player.team = team;
-    emitRoom(roomCode);
+  socket.on("assign_team", ({ playerId, team }) => {
+    assignTeam(playerId, team);
+    const player = db.prepare("SELECT roomCode FROM players WHERE id = ?").get(playerId);
+    if (player) emitRoom(player.roomCode);
   });
 
-  // Update a player’s score
-  socket.on("update_score", ({ roomCode, playerId, delta }) => {
-    const room = rooms[roomCode];
-    if (!room) return;
-    const player = room.players.find((p) => p.id === playerId);
-    if (player) player.score += delta;
-    emitRoom(roomCode);
+  socket.on("adjust_score", ({ playerId, delta }) => {
+    updatePlayerScore(playerId, delta);
+    const player = db.prepare("SELECT roomCode FROM players WHERE id = ?").get(playerId);
+    if (player) emitRoom(player.roomCode);
   });
 
-  // Disconnect handling
   socket.on("disconnect", () => {
-    for (const [code, room] of Object.entries(rooms)) {
-      room.players = room.players.filter((p) => p.id !== socket.id);
-      if (room.players.length === 0) delete rooms[code];
-      else emitRoom(code);
+    const player = db.prepare("SELECT * FROM players WHERE id = ?").get(socket.id);
+    if (player) {
+      removePlayer(socket.id);
+      emitRoom(player.roomCode);
+
+      // If host leaves, destroy the room
+      const room = getRoom(player.roomCode);
+      if (room && room.hostId === socket.id) {
+        deleteRoom(player.roomCode);
+        io.to(player.roomCode).emit("room_closed");
+      }
     }
   });
 });
 
-function emitRoom(roomCode) {
-  const room = rooms[roomCode];
-  if (room) {
-    io.to(roomCode).emit("room_update", {
-      players: room.players,
-      hostId: room.hostId,
-    });
-  }
-}
+// Health Check Endpoint
+app.get("/", (req, res) => {
+  res.send("Buzz-In server running with SQLite 🚀");
+});
 
-const PORT = process.env.PORT || 3000;
-httpServer.listen(PORT, () => {
+const PORT = process.env.PORT || 3001;
+server.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
 });
