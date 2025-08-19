@@ -1,8 +1,14 @@
-// server.js — Buzz-In Backend with Teams, Hot Seat, and Timer
-const express = require("express");
-const http = require("http");
-const { Server } = require("socket.io");
-const { v4: uuidv4 } = require("uuid");
+// server.js — ES Module version
+
+import express from "express";
+import http from "http";
+import { Server } from "socket.io";
+import { v4 as uuidv4 } from "uuid";
+import path from "path";
+import { fileURLToPath } from "url";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const app = express();
 const server = http.createServer(app);
@@ -53,7 +59,6 @@ io.on("connection", (socket) => {
     emitRoom(roomCode);
   });
 
-  // --- Team assignment ---
   socket.on("assign_team", ({ roomCode, playerId, team }) => {
     const room = rooms[roomCode];
     if (!room) return;
@@ -67,17 +72,15 @@ io.on("connection", (socket) => {
     }
   });
 
-  // --- Host controls ---
   socket.on("start_game", ({ roomCode }) => {
     const room = rooms[roomCode];
     if (!room) return;
 
-    // Pick first hot seat players
     const tipsyHot = room.teamQueues.tipsy[0] || null;
     const wobblyHot = room.teamQueues.wobbly[0] || null;
     room.currentHotSeats = { tipsy: tipsyHot, wobbly: wobblyHot };
 
-    room.locked = true; // all locked until buzz
+    room.locked = true;
     room.buzzQueue = [];
     emitRoom(roomCode);
   });
@@ -86,7 +89,6 @@ io.on("connection", (socket) => {
     const room = rooms[roomCode];
     if (!room) return;
 
-    // Rotate queues
     if (room.teamQueues.tipsy.length > 0) {
       room.teamQueues.tipsy.push(room.teamQueues.tipsy.shift());
     }
@@ -125,27 +127,25 @@ io.on("connection", (socket) => {
     emitRoom(roomCode);
   });
 
-  // --- Buzz logic ---
   socket.on("buzz", ({ roomCode }) => {
     const room = rooms[roomCode];
     if (!room) return;
 
-    if (room.locked) return; // cannot buzz when locked
+    if (room.locked) return;
     if (room.buzzQueue.includes(socket.id)) return;
 
     room.buzzQueue.push(socket.id);
 
-    // If hot seat buzzed first, start timer
     if (
       socket.id === room.currentHotSeats.tipsy ||
       socket.id === room.currentHotSeats.wobbly
     ) {
       room.countdownActive = true;
-      room.locked = true; // lock others for countdown
+      room.locked = true;
       emitRoom(roomCode);
 
       setTimeout(() => {
-        room.locked = false; // unlock after 15s
+        room.locked = false;
         room.countdownActive = false;
         emitRoom(roomCode);
       }, 15000);
@@ -173,7 +173,6 @@ io.on("connection", (socket) => {
   });
 });
 
-// --- Serve app ---
 app.use(express.static("dist"));
 
 const PORT = process.env.PORT || 3000;
