@@ -1,51 +1,49 @@
 import express from "express";
-import http from "http";
+import { createServer } from "http";
 import { Server } from "socket.io";
-import { v4 as uuidv4 } from "uuid";
 
 const app = express();
-const server = http.createServer(app);
-
-const io = new Server(server, {
+const httpServer = createServer(app);
+const io = new Server(httpServer, {
   cors: {
     origin: "*",
-    methods: ["GET", "POST"],
   },
-  pingInterval: 25000,   // keep sockets alive
-  pingTimeout: 180000,   // allow 3 minutes idle before disconnect
 });
 
-const PORT = process.env.PORT || 3001;
+// In-memory room store
+const rooms = {};
 
-// In-memory rooms (could later use SQLite if persistence is needed)
-let rooms = {};
+// Built-in room code generator (no uuid needed)
+const generateRoomCode = () =>
+  Math.random().toString(36).substring(2, 6).toUpperCase();
 
-// Utility: broadcast room state
-const emitRoom = (roomCode) => {
+// Helper: emit full room state
+function emitRoom(roomCode) {
   const room = rooms[roomCode];
   if (room) {
     io.to(roomCode).emit("room_update", room);
   }
-};
+}
 
+// Handle socket connections
 io.on("connection", (socket) => {
   console.log("New client connected:", socket.id);
 
-  // Create a room
+  // Create a new game room
   socket.on("create_room", ({ hostName }, cb) => {
-    const roomCode = uuidv4().slice(0, 4).toUpperCase();
+    const roomCode = generateRoomCode();
     rooms[roomCode] = {
-      code: roomCode,
       hostId: socket.id,
-      players: [{ id: socket.id, name: hostName, team: null, score: 0 }],
-      hotseatQueue: [],
+      hostName,
+      players: [],
+      buzzed: null,
     };
     socket.join(roomCode);
     cb({ ok: true, roomCode });
     emitRoom(roomCode);
   });
 
-  // Join room
+  // Join existing room
   socket.on("join_room", ({ roomCode, name }, cb) => {
     const room = rooms[roomCode];
     if (!room) return cb({ ok: false, error: "Room not found" });
@@ -56,48 +54,53 @@ io.on("connection", (socket) => {
     emitRoom(roomCode);
   });
 
-  // Assign team (host only)
-  socket.on("assign_team", ({ roomCode, playerId, team }) => {
-    const room = rooms[roomCode];
-    if (!room || socket.id !== room.hostId) return;
-    const player = room.players.find((p) => p.id === playerId);
-    if (player) player.team = team;
-    emitRoom(roomCode);
-  });
-
-  // Award points (host only)
-  socket.on("award_points", ({ roomCode, playerId, delta }) => {
-    const room = rooms[roomCode];
-    if (!room || socket.id !== room.hostId) return;
-    const player = room.players.find((p) => p.id === playerId);
-    if (player) player.score += delta;
-    emitRoom(roomCode);
-  });
-
   // Buzz in
   socket.on("buzz", ({ roomCode }) => {
     const room = rooms[roomCode];
-    if (!room) return;
-    io.to(roomCode).emit("player_buzzed", { playerId: socket.id });
+    if (!room || room.buzzed) return;
+    room.buzzed = socket.id;
+    emitRoom(roomCode);
+  });
+
+  // Award points (only host)
+  socket.on("award_points", ({ roomCode, playerId, points }) => {
+    const room = rooms[roomCode];
+    if (!room || socket.id !== room.hostId) return;
+
+    const player = room.players.find((p) => p.id === playerId);
+    if (player) {
+      player.score += points;
+      room.buzzed = null;
+      emitRoom(roomCode);
+    }
+  });
+
+  // Reset buzz
+  socket.on("reset_buzz", ({ roomCode }) => {
+    const room = rooms[roomCode];
+    if (!room || socket.id !== room.hostId) return;
+
+    room.buzzed = null;
+    emitRoom(roomCode);
   });
 
   // Disconnect
   socket.on("disconnect", () => {
-    console.log("Client disconnected:", socket.id);
-    for (const code in rooms) {
-      const room = rooms[code];
-      room.players = room.players.filter((p) => p.id !== socket.id);
-
-      // if host left, delete the room
+    for (const [roomCode, room] of Object.entries(rooms)) {
       if (room.hostId === socket.id) {
-        delete rooms[code];
+        delete rooms[roomCode];
+        io.to(roomCode).emit("room_closed");
       } else {
-        emitRoom(code);
+        room.players = room.players.filter((p) => p.id !== socket.id);
+        emitRoom(roomCode);
       }
     }
+    console.log("Client disconnected:", socket.id);
   });
 });
 
-server.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+// Start server
+const PORT = process.env.PORT || 3001;
+httpServer.listen(PORT, () => {
+  console.log(`Server listening on port ${PORT}`);
 });
