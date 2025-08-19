@@ -1,219 +1,148 @@
-// server.js (ESM) — Buzz-In backend with Hot Seat mechanic
+// main.jsx — Buzz-In Frontend with Hot Seat support
 
-import express from "express";
-import http from "http";
-import cors from "cors";
-import { Server } from "socket.io";
+import React, { useState, useEffect } from "react";
+import ReactDOM from "react-dom/client";
+import io from "socket.io-client";
 
-const app = express();
-app.use(cors({ origin: "*" }));
+const socket = io("/", { path: "/socket.io" });
 
-// Health check
-app.get("/health", (_req, res) => res.send("ok"));
+function App() {
+  const [step, setStep] = useState("menu"); // menu | lobby | game
+  const [roomCode, setRoomCode] = useState("");
+  const [name, setName] = useState("");
+  const [room, setRoom] = useState(null);
+  const [isHost, setIsHost] = useState(false);
 
-const server = http.createServer(app);
-const io = new Server(server, {
-  cors: { origin: "*" },
-  path: "/socket.io",
-  transports: ["websocket", "polling"],
-});
+  // listen for state updates
+  useEffect(() => {
+    socket.on("room_state", (data) => {
+      setRoom(data);
+    });
+    return () => socket.off("room_state");
+  }, []);
 
-// ------------ In-memory room state ------------
-const rooms = new Map(); // roomCode -> {roomCode, hostId, players[], buzzQueue[], locked, showScores, hotSeatQueue, currentHotSeats, countdownActive}
-
-function code4() {
-  const A = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-  return Array.from({ length: 4 }, () => A[Math.floor(Math.random() * A.length)]).join("");
-}
-
-function teamTotals(room) {
-  const t = { tipsy: 0, wobbly: 0 };
-  for (const p of room.players) {
-    if (p.team === "tipsy") t.tipsy += p.score || 0;
-    if (p.team === "wobbly") t.wobbly += p.score || 0;
+  function createRoom() {
+    if (!name) return;
+    socket.emit("create_room", { hostName: name }, (res) => {
+      if (res.ok) {
+        setRoomCode(res.roomCode);
+        setIsHost(true);
+        setStep("lobby");
+      } else alert(res.error);
+    });
   }
-  return t;
+
+  function joinRoom() {
+    if (!roomCode || !name) return;
+    socket.emit("join_room", { roomCode, name }, (res) => {
+      if (res.ok) {
+        setIsHost(false);
+        setStep("lobby");
+      } else alert(res.error);
+    });
+  }
+
+  // host actions
+  function startGame() {
+    socket.emit("start_game", { roomCode });
+  }
+
+  function nextRound() {
+    socket.emit("next_round", { roomCode });
+  }
+
+  function clearBuzzers() {
+    socket.emit("clear_buzzers", { roomCode });
+  }
+
+  function adjustScore(playerId, delta) {
+    socket.emit("adjust_score", { roomCode, playerId, delta });
+  }
+
+  function buzz() {
+    socket.emit("buzz", { roomCode });
+  }
+
+  // -------------------- UI --------------------
+  if (step === "menu") {
+    return (
+      <div>
+        <h1>Buzz-In</h1>
+        <input placeholder="Your Name" value={name} onChange={(e) => setName(e.target.value)} />
+        <div>
+          <button onClick={createRoom}>Host Game</button>
+        </div>
+        <div>
+          <input placeholder="Room Code" value={roomCode} onChange={(e) => setRoomCode(e.target.value.toUpperCase())} />
+          <button onClick={joinRoom}>Join Game</button>
+        </div>
+      </div>
+    );
+  }
+
+  if (!room) return <div>Loading room...</div>;
+
+  return (
+    <div>
+      <h1>Room {room.roomCode}</h1>
+      <h2>Team Scores</h2>
+      <p>Tipsy: {room.teamScores?.tipsy ?? 0} | Wobbly: {room.teamScores?.wobbly ?? 0}</p>
+
+      {room.countdownActive && <h3>Countdown Active! 15s in progress...</h3>}
+
+      <h2>Players</h2>
+      <ul>
+        {room.players.map((p) => {
+          const isHotSeat =
+            p.id === room.currentHotSeats?.tipsy || p.id === room.currentHotSeats?.wobbly;
+          return (
+            <li key={p.id}>
+              {p.name} ({p.team || "Unassigned"}) - {p.score} pts{" "}
+              {isHotSeat && <strong>🔥 Hot Seat</strong>}
+              {isHost && (
+                <>
+                  <button onClick={() => adjustScore(p.id, 50)}>+50</button>
+                  <button onClick={() => adjustScore(p.id, 0)}>0</button>
+                  <button onClick={() => adjustScore(p.id, -50)}>-50</button>
+                </>
+              )}
+            </li>
+          );
+        })}
+      </ul>
+
+      {isHost ? (
+        <div>
+          <button onClick={startGame}>Start Game</button>
+          <button onClick={nextRound}>Next Round</button>
+          <button onClick={clearBuzzers}>Clear Buzzers</button>
+        </div>
+      ) : (
+        <div>
+          <button
+            onClick={buzz}
+            disabled={room.locked}
+            style={{
+              padding: "20px",
+              fontSize: "24px",
+              backgroundColor: room.locked ? "gray" : "orange",
+            }}
+          >
+            BUZZ!
+          </button>
+        </div>
+      )}
+
+      <h2>Buzz Queue</h2>
+      <ol>
+        {room.buzzQueue.map((id) => {
+          const p = room.players.find((x) => x.id === id);
+          return <li key={id}>{p ? p.name : id}</li>;
+        })}
+      </ol>
+    </div>
+  );
 }
 
-function emitState(roomCode) {
-  const r = rooms.get(roomCode);
-  if (!r) return;
-  io.to(roomCode).emit("room_state", {
-    roomCode: r.roomCode,
-    hostId: r.hostId,
-    players: r.players,
-    buzzQueue: r.buzzQueue,
-    locked: r.locked,
-    showScores: r.showScores,
-    teamScores: teamTotals(r),
-    currentHotSeats: r.currentHotSeats || {},
-    countdownActive: r.countdownActive || false,
-  });
-}
-
-// ------------ Socket handlers ------------
-io.on("connection", (socket) => {
-  socket.data.roomCode = null;
-  socket.data.name = null;
-
-  socket.on("create_room", ({ hostName }, ack) => {
-    try {
-      let code = code4();
-      while (rooms.has(code)) code = code4();
-      const room = {
-        roomCode: code,
-        hostId: socket.id,
-        hostName: hostName || "Host",
-        players: [{ id: socket.id, name: hostName || "Host", score: 0, team: null }],
-        buzzQueue: [],
-        locked: false,
-        showScores: false,
-        hotSeatQueue: { tipsy: [], wobbly: [] },
-        currentHotSeats: {},
-        countdownActive: false,
-      };
-      rooms.set(code, room);
-      socket.join(code);
-      socket.data.roomCode = code;
-      socket.data.name = hostName || "Host";
-      emitState(code);
-      ack && ack({ ok: true, roomCode: code });
-    } catch {
-      ack && ack({ ok: false, error: "Failed to create room" });
-    }
-  });
-
-  socket.on("join_room", ({ roomCode, name }, ack) => {
-    const code = (roomCode || "").toUpperCase().trim();
-    const room = rooms.get(code);
-    if (!room) return ack && ack({ ok: false, error: "Room not found" });
-    if (!room.players.find((p) => p.id === socket.id)) {
-      room.players.push({ id: socket.id, name: name || "Player", score: 0, team: null });
-    }
-    socket.join(code);
-    socket.data.roomCode = code;
-    socket.data.name = name || "Player";
-    emitState(code);
-    ack && ack({ ok: true });
-  });
-
-  // Assign teams
-  socket.on("assign_team", ({ roomCode, playerId, team }, ack) => {
-    const room = rooms.get((roomCode || "").toUpperCase().trim());
-    if (!room || room.hostId !== socket.id) return ack && ack({ ok: false, error: "Not allowed" });
-    const p = room.players.find((x) => x.id === playerId);
-    if (!p) return ack && ack({ ok: false, error: "Player not found" });
-    p.team = team ?? null;
-    emitState(roomCode);
-    ack && ack({ ok: true });
-  });
-
-  // Start game -> initialize hot seat queues
-  socket.on("start_game", ({ roomCode }) => {
-    const room = rooms.get((roomCode || "").toUpperCase().trim());
-    if (!room || room.hostId !== socket.id) return;
-
-    room.hotSeatQueue = { tipsy: [], wobbly: [] };
-    for (const p of room.players) {
-      if (p.team === "tipsy") room.hotSeatQueue.tipsy.push(p.id);
-      if (p.team === "wobbly") room.hotSeatQueue.wobbly.push(p.id);
-    }
-
-    room.currentHotSeats = {
-      tipsy: room.hotSeatQueue.tipsy.shift() || null,
-      wobbly: room.hotSeatQueue.wobbly.shift() || null,
-    };
-    room.locked = false;
-    room.countdownActive = false;
-
-    emitState(roomCode);
-  });
-
-  // Buzz logic (hot seat + countdown)
-  socket.on("buzz", ({ roomCode }) => {
-    const code = (roomCode || socket.data.roomCode || "").toUpperCase().trim();
-    const room = rooms.get(code);
-    if (!room || room.locked) return;
-    if (!room.players.find((p) => p.id === socket.id)) return;
-
-    const { tipsy, wobbly } = room.currentHotSeats || {};
-    const isHotSeat = socket.id === tipsy || socket.id === wobbly;
-
-    if (isHotSeat && !room.countdownActive) {
-      // Hot seat buzz -> lock everyone, start countdown
-      room.buzzQueue.push(socket.id);
-      room.locked = true;
-      room.countdownActive = true;
-      emitState(code);
-
-      setTimeout(() => {
-        room.locked = false; // unlock after 15s
-        room.countdownActive = false;
-        emitState(code);
-      }, 15000);
-    } else if (!room.countdownActive && !room.buzzQueue.includes(socket.id)) {
-      // Allow buzz after countdown
-      room.buzzQueue.push(socket.id);
-      emitState(code);
-    }
-  });
-
-  // Next round -> rotate next hot seat players
-  socket.on("next_round", ({ roomCode }) => {
-    const room = rooms.get((roomCode || "").toUpperCase().trim());
-    if (!room || room.hostId !== socket.id) return;
-
-    room.buzzQueue = [];
-    room.showScores = false;
-
-    room.currentHotSeats = {
-      tipsy: room.hotSeatQueue.tipsy.shift() || null,
-      wobbly: room.hotSeatQueue.wobbly.shift() || null,
-    };
-    room.locked = false;
-    room.countdownActive = false;
-
-    emitState(roomCode);
-  });
-
-  // Clear buzzers
-  socket.on("clear_buzzers", ({ roomCode }) => {
-    const room = rooms.get((roomCode || "").toUpperCase().trim());
-    if (!room || room.hostId !== socket.id) return;
-    room.buzzQueue = [];
-    room.showScores = false;
-    emitState(roomCode);
-  });
-
-  // Score adjustment
-  socket.on("adjust_score", ({ roomCode, playerId, delta }) => {
-    const room = rooms.get((roomCode || "").toUpperCase().trim());
-    if (!room) return;
-    const player = room.players.find((p) => p.id === playerId);
-    if (!player) return;
-
-    player.score = (player.score || 0) + delta;
-    emitState(roomCode);
-  });
-
-  // Disconnect
-  socket.on("disconnect", () => {
-    const code = socket.data.roomCode;
-    if (!code) return;
-    const room = rooms.get(code);
-    if (!room) return;
-    room.players = room.players.filter((p) => p.id !== socket.id);
-    room.buzzQueue = room.buzzQueue.filter((id) => id !== socket.id);
-    if (room.hostId === socket.id) {
-      if (room.players.length === 0) rooms.delete(code);
-      else room.hostId = room.players[0].id;
-    }
-    if (rooms.has(code)) emitState(code);
-  });
-});
-
-// PORT from Render
-const PORT = process.env.PORT || 5175;
-server.listen(PORT, "0.0.0.0", () => {
-  console.log("Buzz server listening on port", PORT);
-});
+const root = ReactDOM.createRoot(document.getElementById("root"));
+root.render(<App />);
