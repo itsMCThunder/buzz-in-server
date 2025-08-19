@@ -1,26 +1,18 @@
 {
   "name": "buzz-in-server",
   "version": "1.0.0",
-  "description": "Buzz-In game server with Socket.IO and SQLite persistence",
-  "main": "server.js",
   "type": "module",
+  "main": "server.js",
   "scripts": {
-    "start": "node server.js",
-    "dev": "nodemon server.js"
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "socket.io": "^4.7.5",
+    "sqlite3": "^5.1.7",
+    "sqlite": "^5.2.4"
   },
   "engines": {
     "node": ">=18"
-  },
-  "dependencies": {
-    "express": "^4.18.2",
-    "socket.io": "^4.7.5",
-    "sqlite": "^5.1.1",
-    "sqlite3": "^5.1.6"
-  },
-  "devDependencies": {
-    "nodemon": "^3.0.3"
-  },
-  "keywords": [],
-  "author": "",
-  "license": "MIT"
+  }
 }
