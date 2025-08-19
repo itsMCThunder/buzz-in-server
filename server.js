@@ -25,6 +25,7 @@ function code4() {
   const A = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
   return Array.from({ length: 4 }, () => A[Math.floor(Math.random() * A.length)]).join("");
 }
+
 function teamTotals(room) {
   const t = { tipsy: 0, wobbly: 0 };
   for (const p of room.players) {
@@ -33,6 +34,7 @@ function teamTotals(room) {
   }
   return t;
 }
+
 function emitState(roomCode) {
   const r = rooms.get(roomCode);
   if (!r) return;
@@ -118,30 +120,20 @@ io.on("connection", (socket) => {
     emitState(code);
   });
 
-  // Handle score adjustment from host
-socket.on("adjust_score", ({ roomCode, playerId, delta }) => {
-  const room = rooms[roomCode];
-  if (!room) return;
+  // ---------- NEW: Handle score adjustment from host ----------
+  socket.on("adjust_score", ({ roomCode, playerId, delta }) => {
+    const code = (roomCode || "").toUpperCase().trim();
+    const room = rooms.get(code);
+    if (!room) return;
 
-  const player = room.players.find((p) => p.id === playerId);
-  if (!player) return;
+    const player = room.players.find((p) => p.id === playerId);
+    if (!player) return;
 
-  // Update player score
-  player.score = (player.score || 0) + delta;
+    // Update player score
+    player.score = (player.score || 0) + delta;
 
-  // Update team totals if assigned
-  if (player.team) {
-    if (!room.teamScores) {
-      room.teamScores = { tipsy: 0, wobbly: 0 };
-    }
-    room.teamScores[player.team] =
-      (room.teamScores[player.team] || 0) + delta;
-  }
-
-  // Send update to everyone in the room
-  io.to(roomCode).emit("room_update", room);
-});
-
+    emitState(code); // Broadcast updated scores
+  });
 
   socket.on("next_question", ({ roomCode }) => {
     const code = (roomCode || "").toUpperCase().trim();
