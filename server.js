@@ -1,128 +1,103 @@
 import express from "express";
-import { createServer } from "http";
+import http from "http";
 import { Server } from "socket.io";
-import sqlite3 from "sqlite3";
-import { open } from "sqlite";
+import { v4 as uuidv4 } from "uuid";
 
 const app = express();
-const httpServer = createServer(app);
-const io = new Server(httpServer, {
+const server = http.createServer(app);
+
+const io = new Server(server, {
   cors: {
     origin: "*",
+    methods: ["GET", "POST"],
   },
+  pingInterval: 25000,   // keep sockets alive
+  pingTimeout: 180000,   // allow 3 minutes idle before disconnect
 });
 
-// ------------------------
-// SQLite Database
-// ------------------------
-let db;
-(async () => {
-  db = await open({
-    filename: "./buzzin.sqlite",
-    driver: sqlite3.Database,
-  });
+const PORT = process.env.PORT || 3001;
 
-  await db.exec(`
-    CREATE TABLE IF NOT EXISTS rooms (
-      roomCode TEXT PRIMARY KEY,
-      hostId TEXT,
-      createdAt INTEGER
-    )
-  `);
+// In-memory rooms (could later use SQLite if persistence is needed)
+let rooms = {};
 
-  await db.exec(`
-    CREATE TABLE IF NOT EXISTS players (
-      id TEXT PRIMARY KEY,
-      roomCode TEXT,
-      name TEXT,
-      team TEXT,
-      score INTEGER
-    )
-  `);
-})();
+// Utility: broadcast room state
+const emitRoom = (roomCode) => {
+  const room = rooms[roomCode];
+  if (room) {
+    io.to(roomCode).emit("room_update", room);
+  }
+};
 
-// ------------------------
-// Helper Functions
-// ------------------------
-function generateRoomCode(length = 5) {
-  return Math.random().toString(36).substring(2, 2 + length).toUpperCase();
-}
-
-async function getRoomPlayers(roomCode) {
-  return db.all(`SELECT * FROM players WHERE roomCode = ?`, [roomCode]);
-}
-
-async function emitRoom(roomCode) {
-  const players = await getRoomPlayers(roomCode);
-  io.to(roomCode).emit("room_update", { roomCode, players });
-}
-
-// ------------------------
-// Socket Events
-// ------------------------
 io.on("connection", (socket) => {
-  console.log("Client connected:", socket.id);
+  console.log("New client connected:", socket.id);
 
-  // Create room
-  socket.on("create_room", async ({ hostName }, cb) => {
-    const roomCode = generateRoomCode();
-    await db.run(
-      `INSERT INTO rooms (roomCode, hostId, createdAt) VALUES (?, ?, ?)`,
-      [roomCode, socket.id, Date.now()]
-    );
-
-    await db.run(
-      `INSERT INTO players (id, roomCode, name, team, score) VALUES (?, ?, ?, ?, ?)`,
-      [socket.id, roomCode, hostName, "Host", 0]
-    );
-
+  // Create a room
+  socket.on("create_room", ({ hostName }, cb) => {
+    const roomCode = uuidv4().slice(0, 4).toUpperCase();
+    rooms[roomCode] = {
+      code: roomCode,
+      hostId: socket.id,
+      players: [{ id: socket.id, name: hostName, team: null, score: 0 }],
+      hotseatQueue: [],
+    };
     socket.join(roomCode);
     cb({ ok: true, roomCode });
     emitRoom(roomCode);
   });
 
   // Join room
-  socket.on("join_room", async ({ roomCode, name }, cb) => {
-    const room = await db.get(`SELECT * FROM rooms WHERE roomCode = ?`, [
-      roomCode,
-    ]);
+  socket.on("join_room", ({ roomCode, name }, cb) => {
+    const room = rooms[roomCode];
     if (!room) return cb({ ok: false, error: "Room not found" });
 
-    await db.run(
-      `INSERT INTO players (id, roomCode, name, team, score) VALUES (?, ?, ?, ?, ?)`,
-      [socket.id, roomCode, name, null, 0]
-    );
-
+    room.players.push({ id: socket.id, name, team: null, score: 0 });
     socket.join(roomCode);
     cb({ ok: true });
     emitRoom(roomCode);
   });
 
-  // Award points
-  socket.on("award_points", async ({ roomCode, playerId, points }) => {
-    await db.run(`UPDATE players SET score = score + ? WHERE id = ?`, [
-      points,
-      playerId,
-    ]);
+  // Assign team (host only)
+  socket.on("assign_team", ({ roomCode, playerId, team }) => {
+    const room = rooms[roomCode];
+    if (!room || socket.id !== room.hostId) return;
+    const player = room.players.find((p) => p.id === playerId);
+    if (player) player.team = team;
     emitRoom(roomCode);
   });
 
+  // Award points (host only)
+  socket.on("award_points", ({ roomCode, playerId, delta }) => {
+    const room = rooms[roomCode];
+    if (!room || socket.id !== room.hostId) return;
+    const player = room.players.find((p) => p.id === playerId);
+    if (player) player.score += delta;
+    emitRoom(roomCode);
+  });
+
+  // Buzz in
+  socket.on("buzz", ({ roomCode }) => {
+    const room = rooms[roomCode];
+    if (!room) return;
+    io.to(roomCode).emit("player_buzzed", { playerId: socket.id });
+  });
+
   // Disconnect
-  socket.on("disconnect", async () => {
-    const player = await db.get(`SELECT * FROM players WHERE id = ?`, [
-      socket.id,
-    ]);
-    if (player) {
-      await db.run(`DELETE FROM players WHERE id = ?`, [socket.id]);
-      emitRoom(player.roomCode);
+  socket.on("disconnect", () => {
+    console.log("Client disconnected:", socket.id);
+    for (const code in rooms) {
+      const room = rooms[code];
+      room.players = room.players.filter((p) => p.id !== socket.id);
+
+      // if host left, delete the room
+      if (room.hostId === socket.id) {
+        delete rooms[code];
+      } else {
+        emitRoom(code);
+      }
     }
   });
 });
 
-// ------------------------
-// Server Start
-// ------------------------
-const PORT = process.env.PORT || 5000;
-httpServer.listen(PORT, () => {
+server.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
 });
