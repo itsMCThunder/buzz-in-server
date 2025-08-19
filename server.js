@@ -1,96 +1,65 @@
 import express from "express";
-import { createServer } from "http";
+import http from "http";
 import { Server } from "socket.io";
-import cors from "cors";
+import { v4 as uuidv4 } from "uuid";
 
 const app = express();
-app.use(cors());
+const server = http.createServer(app);
+const io = new Server(server, { cors: { origin: "*" } });
 
-const httpServer = createServer(app);
-const io = new Server(httpServer, {
-  cors: {
-    origin: "*",
-    methods: ["GET", "POST"]
-  }
-});
-
-// In-memory room storage
 const rooms = {};
 
-// Helper: broadcast room state
+// Helper to send room updates
 function emitRoom(roomCode) {
   const room = rooms[roomCode];
-  if (!room) return;
-  io.to(roomCode).emit("room_update", {
-    roomCode,
-    players: room.players,
-    hostId: room.hostId
-  });
-}
-
-// Generate 4-letter room code
-function generateRoomCode() {
-  const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
-  let code;
-  do {
-    code = Array.from({ length: 4 }, () =>
-      chars[Math.floor(Math.random() * chars.length)]
-    ).join("");
-  } while (rooms[code]);
-  return code;
+  if (room) {
+    io.to(roomCode).emit("room_update", room);
+  }
 }
 
 io.on("connection", (socket) => {
-  console.log("Client connected:", socket.id);
+  console.log("New connection:", socket.id);
 
-  // Host creates a room
   socket.on("create_room", ({ hostName }, cb) => {
-    const roomCode = generateRoomCode();
+    const roomCode = uuidv4().slice(0, 5).toUpperCase();
     rooms[roomCode] = {
       hostId: socket.id,
-      players: [{ id: socket.id, name: hostName, team: null, score: 0 }]
+      players: [{ id: socket.id, name: hostName, team: null, score: 0 }],
     };
     socket.join(roomCode);
     cb({ ok: true, roomCode });
     emitRoom(roomCode);
   });
 
-  // Player joins a room
   socket.on("join_room", ({ roomCode, name }, cb) => {
     const room = rooms[roomCode];
     if (!room) return cb({ ok: false, error: "Room not found" });
-
     room.players.push({ id: socket.id, name, team: null, score: 0 });
     socket.join(roomCode);
     cb({ ok: true });
     emitRoom(roomCode);
   });
 
-  // Disconnect handling
+  socket.on("award_points", ({ roomCode, playerId, delta }) => {
+    const room = rooms[roomCode];
+    if (!room) return;
+    if (socket.id !== room.hostId) return; // only host can award
+
+    const player = room.players.find((p) => p.id === playerId);
+    if (player) {
+      player.score += delta;
+      emitRoom(roomCode);
+    }
+  });
+
   socket.on("disconnect", () => {
+    console.log("Disconnected:", socket.id);
     for (const [roomCode, room] of Object.entries(rooms)) {
-      const index = room.players.findIndex((p) => p.id === socket.id);
-      if (index !== -1) {
-        room.players.splice(index, 1);
-        if (room.hostId === socket.id) {
-          // End room if host leaves
-          delete rooms[roomCode];
-          io.to(roomCode).emit("room_closed");
-        } else {
-          emitRoom(roomCode);
-        }
-        break;
-      }
+      room.players = room.players.filter((p) => p.id !== socket.id);
+      emitRoom(roomCode);
     }
   });
 });
 
-// Root health check
-app.get("/", (req, res) => {
-  res.send("Buzz-In server is running!");
-});
-
 const PORT = process.env.PORT || 3001;
-httpServer.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-});
+server.listen(PORT, () => console.log(`Server running on ${PORT}`));
