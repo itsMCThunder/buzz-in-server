@@ -30,7 +30,9 @@ io.on("connection", (socket) => {
       },
       buzzed: null,
       queue: [],
-      timers: { buzz: null, unlock: null }
+      buzzersLocked: false,
+      timers: { buzz: null, unlock: null },
+      gameStarted: false,
     };
     socket.join(code);
     callback({ ok: true, roomCode: code });
@@ -73,6 +75,7 @@ io.on("connection", (socket) => {
   socket.on("start_game", ({ roomCode }) => {
     const room = rooms[roomCode];
     if (!room || room.hostId !== socket.id) return;
+    room.gameStarted = true;
     if (room.mode === "teams") {
       if (room.teams.A.players.length > 0)
         room.teams.A.hotSeat = room.teams.A.players[0].id;
@@ -83,18 +86,20 @@ io.on("connection", (socket) => {
     if (room.timers.unlock) clearTimeout(room.timers.unlock);
     room.timers.unlock = setTimeout(() => {
       io.to(roomCode).emit("unlock_all");
+      room.buzzersLocked = false;
     }, 20000);
   });
 
   socket.on("buzz", ({ roomCode }) => {
     const room = rooms[roomCode];
-    if (!room) return;
+    if (!room || room.buzzersLocked) return;
     if (!room.buzzed) {
       room.buzzed = socket.id;
       io.to(roomCode).emit("room_update", room);
       if (room.timers.buzz) clearTimeout(room.timers.buzz);
       room.timers.buzz = setTimeout(() => {
         io.to(roomCode).emit("unlock_all");
+        room.buzzersLocked = false;
       }, 15000);
     } else {
       if (!room.queue.includes(socket.id)) {
@@ -113,10 +118,7 @@ io.on("connection", (socket) => {
         if (player.team) room.teams[player.team].score += points;
       }
       io.to(roomCode).emit("show_score_popup", {
-        teamScores: {
-          A: room.teams.A.score,
-          B: room.teams.B.score
-        }
+        teamScores: { A: room.teams.A.score, B: room.teams.B.score }
       });
     }
   });
@@ -134,6 +136,22 @@ io.on("connection", (socket) => {
     }
     io.to(roomCode).emit("room_update", room);
     io.to(roomCode).emit("close_score_popup");
+  });
+
+  socket.on("lock_buzzers", ({ roomCode }) => {
+    const room = rooms[roomCode];
+    if (room && room.hostId === socket.id) {
+      room.buzzersLocked = true;
+      io.to(roomCode).emit("lock_all");
+    }
+  });
+
+  socket.on("unlock_buzzers", ({ roomCode }) => {
+    const room = rooms[roomCode];
+    if (room && room.hostId === socket.id) {
+      room.buzzersLocked = false;
+      io.to(roomCode).emit("unlock_all");
+    }
   });
 
   socket.on("disconnect", () => {
