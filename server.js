@@ -33,7 +33,7 @@ io.on("connection", (socket) => {
     if (!rooms[roomCode]) return callback({ ok: false, error: "Room not found" });
     rooms[roomCode].players.push({ id: socket.id, name, score: 0 });
     socket.join(roomCode);
-    callback({ ok: true });
+    callback({ ok: true, roomCode });
     io.to(roomCode).emit("room_update", rooms[roomCode]);
   });
 
@@ -72,6 +72,8 @@ io.on("connection", (socket) => {
 
       if (room.hostId === socket.id) {
         io.to(code).emit("room_closed");
+        delete rooms[code];
+      } else if (room.players.length === 0) {
         delete rooms[code];
       } else {
         io.to(code).emit("room_update", room);
