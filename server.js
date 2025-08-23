@@ -341,6 +341,52 @@ io.on("connection", (socket) => {
     startRound(room);
   });
 
+  // NEW: Kick player from room entirely
+  socket.on("host:kickPlayer", ({ code, playerId }) => {
+    const room = getRoomByCode(code); if (!room) return;
+    if (room.hostId !== socket.id) return;
+    const player = getPlayer(room, playerId); if (!player) return;
+
+    // Remove from team rosters
+    for (const k of ["A","B"]) {
+      const list = room.teams[k].players;
+      const idx = list.indexOf(playerId);
+      if (idx !== -1) list.splice(idx,1);
+    }
+
+    // Remove from queue
+    room.queue = room.queue.filter(id => id !== playerId);
+
+    // If they were the current buzz player, advance the decision timer
+    if (room.currentBuzzPlayer === playerId) {
+      room.currentBuzzPlayer = null;
+      room.currentBuzzDeadline = 0;
+      clearTimeout(room.timers.decision);
+      startDecisionTimer(room);
+    }
+
+    // If they were in a hot seat, refill it
+    if (room.hotSeats.A === playerId || room.hotSeats.B === playerId) {
+      ensureHotSeatsLive(room);
+    }
+
+    // Notify the player and remove from room
+    try {
+      if (player.socketId) {
+        io.to(player.socketId).emit("player:kicked", { code: room.code });
+        const s = io.sockets.sockets.get(player.socketId);
+        if (s) {
+          s.leave(room.code);
+          // s.disconnect(true); // optional: hard disconnect
+        }
+      }
+    } catch (e) { /* ignore */ }
+
+    room.players.delete(playerId);
+    touch(room);
+    broadcastRoom(room);
+  });
+
   socket.on("host:clearScores", ({ code }) => {
     const room = getRoomByCode(code); if (!room) return;
     if (room.hostId !== socket.id) return;
