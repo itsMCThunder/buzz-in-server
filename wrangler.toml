@@ -1,7 +1,0 @@
-name = "buzzin-server"
-compatibility_date = "2025-08-13"
-
-[vars]
-NODE_ENV = "production"
-
-main = "src/index.js"
