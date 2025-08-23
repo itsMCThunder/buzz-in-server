@@ -30,6 +30,7 @@ app.get("/health", (req, res) => {
 
 const server = http.createServer(app);
 const io = new Server(server, {
+  path: "/socket.io",
   cors: {
     origin: allowedOrigins.includes("*") ? "*" : allowedOrigins,
     methods: ["GET", "POST"]
@@ -39,8 +40,8 @@ const io = new Server(server, {
 // -------------------- GAME STATE --------------------
 const rooms = new Map();
 const ROOM_IDLE_MS = 30 * 60 * 1000; // 30 minutes
-const BUZZ_LOCK_MS = 20 * 1000; // 20 seconds after round starts
-const HOST_DECISION_MS = 15 * 1000; // 15 sec per buzz decision
+const BUZZ_LOCK_MS = 20 * 1000;      // 20 seconds after round starts
+const HOST_DECISION_MS = 15 * 1000;  // 15 sec per buzz decision
 
 function now() { return Date.now(); }
 
@@ -75,9 +76,7 @@ function defaultRoom(hostId, hostName) {
   };
 }
 
-function touch(room) {
-  room.lastActivity = now();
-}
+function touch(room) { room.lastActivity = now(); }
 
 function cleanupRooms() {
   const t = now();
@@ -91,12 +90,8 @@ function cleanupRooms() {
 setInterval(cleanupRooms, 60 * 1000);
 
 // Utility getters
-function getRoomByCode(code) {
-  return rooms.get(code);
-}
-function getPlayer(room, playerId) {
-  return room.players.get(playerId) || null;
-}
+function getRoomByCode(code) { return rooms.get(code); }
+function getPlayer(room, playerId) { return room.players.get(playerId) || null; }
 function playerIsHotSeat(room, playerId) {
   return room.hotSeats.A === playerId || room.hotSeats.B === playerId;
 }
@@ -124,9 +119,7 @@ function publicRoomState(room) {
   };
 }
 
-function broadcastRoom(room) {
-  io.to(room.code).emit("room:update", publicRoomState(room));
-}
+function broadcastRoom(room) { io.to(room.code).emit("room:update", publicRoomState(room)); }
 
 function pickNextHotSeat(room, teamKey) {
   const team = room.teams[teamKey];
@@ -166,7 +159,7 @@ function startDecisionTimer(room) {
   room.currentBuzzPlayer = room.queue[0];
   room.currentBuzzDeadline = now() + HOST_DECISION_MS;
   room.timers.decision = setTimeout(() => {
-    // Auto-skip
+    // Auto-skip if host doesn't act in time
     const front = room.queue[0];
     if (front === room.currentBuzzPlayer) {
       room.queue.shift();
@@ -212,7 +205,7 @@ function endRoundToSummary(room) {
 }
 
 function ensureHotSeatsLive(room) {
-  // if a hotseat player disconnected, pick a new one
+  // if a hot-seat player disconnected, pick a new one
   for (const k of ["A", "B"]) {
     const pid = room.hotSeats[k];
     if (!pid) {
@@ -227,12 +220,10 @@ function ensureHotSeatsLive(room) {
 }
 
 io.on("connection", (socket) => {
-  // ---- Handy for debugging ----
   socket.on("disconnect", () => {
     // Find if player or host of a room
     for (const [code, room] of rooms) {
       if (room.hostId === socket.id) {
-        // End the room when host leaves (simplest, per v1)
         io.to(code).emit("room:ended", { reason: "host-left" });
         rooms.delete(code);
         break;
@@ -301,7 +292,6 @@ io.on("connection", (socket) => {
   socket.on("host:startGame", ({ code }) => {
     const room = getRoomByCode(code); if (!room) return;
     if (room.hostId !== socket.id) return;
-    // need at least 1 player per team
     if (!room.teams.A.players.length || !room.teams.B.players.length) {
       socket.emit("error:message", { message: "Need at least one player on each team." });
       return;
@@ -312,7 +302,6 @@ io.on("connection", (socket) => {
   socket.on("host:awardPoint", ({ code }) => {
     const room = getRoomByCode(code); if (!room) return;
     if (room.hostId !== socket.id) return;
-    // award to the current buzz player (front of queue)
     const pid = room.currentBuzzPlayer;
     if (!pid || room.queue[0] !== pid) return;
 
@@ -329,7 +318,6 @@ io.on("connection", (socket) => {
 
     if (room.queue.length) {
       const front = room.queue[0];
-      // remove front
       room.queue.shift();
       room.currentBuzzPlayer = null;
       room.currentBuzzDeadline = 0;
@@ -341,6 +329,13 @@ io.on("connection", (socket) => {
   });
 
   socket.on("host:nextRound", ({ code }) => {
+    const room = getRoomByCode(code); if (!room) return;
+    if (room.hostId !== socket.id) return;
+    startRound(room);
+  });
+
+  // NEW: Skip round during inRound (same behavior as nextRound)
+  socket.on("host:skipRound", ({ code }) => {
     const room = getRoomByCode(code); if (!room) return;
     if (room.hostId !== socket.id) return;
     startRound(room);
@@ -363,9 +358,8 @@ io.on("connection", (socket) => {
     }
     socket.join(code);
 
-    // Ensure name is present
     const name = (playerName || "Player").toString().trim().slice(0, 24);
-    const id = playerId || socket.id; // allow reconnect with same id if we ever add it later
+    const id = playerId || socket.id;
     const existing = room.players.get(id);
     if (existing) {
       existing.connected = true;
@@ -385,22 +379,18 @@ io.on("connection", (socket) => {
     const p = getPlayer(room, playerId); if (!p || !p.connected) return;
     if (room.state !== "inRound") return;
 
-    // Limit buzzing:
     const lockedPhase = now() < room.buzzLockedUntil;
     const isHot = playerIsHotSeat(room, p.id);
 
     if (lockedPhase && !isHot) {
-      // early buzzing by non-hotseat ignored
       return;
     }
 
-    // Already queued?
     if (room.queue.includes(p.id)) return;
 
     room.queue.push(p.id);
     touch(room);
 
-    // If this is the first in queue, start the decision timer
     if (room.queue.length === 1) {
       startDecisionTimer(room);
     }
@@ -408,7 +398,6 @@ io.on("connection", (socket) => {
     broadcastRoom(room);
   });
 
-  // Falls back for unknown messages
   socket.on("ping:activity", ({ code }) => {
     const room = getRoomByCode(code); if (!room) return;
     touch(room);
